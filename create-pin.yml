@@ -1,0 +1,112 @@
+name: Create and optionally publish Pinterest Pin
+
+on:
+  workflow_dispatch:
+    inputs:
+      title:
+        description: "Pin headline"
+        required: true
+        default: "Norway Offshore Jobs"
+        type: string
+      country:
+        description: "Country or region (Norway, UK, France, Canada, etc.)"
+        required: true
+        default: "Norway"
+        type: string
+      destination_url:
+        description: "Exact AbroadCareerPlus article URL"
+        required: true
+        default: "https://abroadcareerplus.com/"
+        type: string
+      photo_url:
+        description: "Optional direct HTTPS image URL you own or are licensed to use"
+        required: false
+        default: ""
+        type: string
+      publish_to_pinterest:
+        description: "Publish after image generation (requires Pinterest secrets and GitHub Pages)"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      filename: ${{ steps.meta.outputs.filename }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - name: Generate pin
+        env:
+          PIN_TITLE: ${{ inputs.title }}
+          PIN_COUNTRY: ${{ inputs.country }}
+          PIN_URL: ${{ inputs.destination_url }}
+          PIN_PHOTO_URL: ${{ inputs.photo_url }}
+        run: |
+          python agent.py --title "$PIN_TITLE" --country "$PIN_COUNTRY" --url "$PIN_URL" --photo-url "$PIN_PHOTO_URL" --output output
+      - name: Save output filename
+        id: meta
+        run: |
+          echo "filename=$(python -c "import json; print(json.load(open('output/pin.json'))['image_file'])")" >> "$GITHUB_OUTPUT"
+      - name: Upload downloadable pin files
+        uses: actions/upload-artifact@v4
+        with:
+          name: pinterest-pin
+          path: output/
+      - name: Prepare public image for Pinterest API
+        if: ${{ inputs.publish_to_pinterest }}
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: output/
+
+  deploy-image:
+    if: ${{ inputs.publish_to_pinterest }}
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    outputs:
+      page_url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/configure-pages@v5
+      - name: Deploy generated image to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  publish:
+    if: ${{ inputs.publish_to_pinterest }}
+    needs: [build, deploy-image]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests
+      - name: Download generated metadata
+        uses: actions/download-artifact@v4
+        with:
+          name: pinterest-pin
+          path: output/
+      - name: Publish pin through Pinterest API
+        env:
+          PINTEREST_ACCESS_TOKEN: ${{ secrets.PINTEREST_ACCESS_TOKEN }}
+          PINTEREST_BOARD_ID: ${{ secrets.PINTEREST_BOARD_ID }}
+          PAGE_URL: ${{ needs.deploy-image.outputs.page_url }}
+          PIN_FILENAME: ${{ needs.build.outputs.filename }}
+        run: |
+          python publish_pin.py --metadata output/pin.json --image-url "$PAGE_URL/$PIN_FILENAME" --confirm
